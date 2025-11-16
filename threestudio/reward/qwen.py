@@ -97,7 +97,7 @@ class QwenScore(BaseObject):
         if self.text_input is None:
             self.text_input = self.tokenizer.get_prompt(prompt)
 
-        scores = [0,0,0,0]
+        scores = [0] * image.shape[0]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             futures = [executor.submit(process_single_image, i, img, self.text_input) for i, img in enumerate(image)]
