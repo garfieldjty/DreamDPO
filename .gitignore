@@ -31,3 +31,9 @@ dist/
 
 # Hugging Face / cache
 .cache/
+
+
+model_weights/
+outputs/
+.threestudio_cache/
+
