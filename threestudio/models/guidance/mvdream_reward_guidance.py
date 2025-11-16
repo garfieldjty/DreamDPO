@@ -398,7 +398,7 @@ class MultiviewDiffusionGuidance(BaseModule):
     def calc_grad_smooth(self, batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo):
         if beta_dpo > 0.0:
             # Linear ramp: small gaps -> more SDS, large gaps -> more DPO
-            dpo_weight = torch.sigmoid(score_gap / beta_dpo) 
+            dpo_weight = torch.clamp(score_gap / beta_dpo, min=0.0, max=1.0)
         else:
             # Backwards-compatible: beta_dpo <= 0 means "always use DPO-style reward"
             dpo_weight = torch.ones_like(score_gap)
