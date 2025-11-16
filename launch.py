@@ -8,10 +8,10 @@ import time
 import traceback
 
 # If you want to run the code without internet access, uncomment the following lines
-os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "0"
 os.environ["DIFFUSERS_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ['PATH'] += ':/home/zhenglin/miniconda3/envs/threestudio/bin/'
+os.environ['PATH'] += ':/envs/dreamdpo/bin/'
 os.environ['PATH'] += ':/usr/local/cuda-11.8/bin/'
 
 
@@ -133,6 +133,8 @@ def main(args, extras) -> None:
     from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
     from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
     from pytorch_lightning.utilities.rank_zero import rank_zero_only
+
+    torch.set_float32_matmul_precision("medium")
 
     if args.typecheck:
         from jaxtyping import install_import_hook
