@@ -6,6 +6,7 @@ from typing import List
 from http import HTTPStatus
 from abc import abstractmethod
 
+dashscope.base_http_api_url = 'https://dashscope-intl.aliyuncs.com/api/v1'
 
 class BaseModel:
     def __init__(self):
