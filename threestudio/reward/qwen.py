@@ -99,6 +99,9 @@ class QwenScore(BaseObject):
 
         scores = [0] * image.shape[0]
 
+        import time
+        start = time.time()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             futures = [executor.submit(process_single_image, i, img, self.text_input) for i, img in enumerate(image)]
             for future in concurrent.futures.as_completed(futures):
@@ -111,6 +114,8 @@ class QwenScore(BaseObject):
         #     write_image(save_path, img)
         #     status, rsp = self.model.get_model_response(self.text_input, [save_path, ])
         #     scores.append(self.tokenizer.extract_score(rsp))
+
+        print(f"[QwenScore] Time taken for scoring {image.shape[0]} images: {time.time() - start:.2f} seconds")
         print(scores)
         scores = torch.tensor(scores).to(self.device)
         return scores
