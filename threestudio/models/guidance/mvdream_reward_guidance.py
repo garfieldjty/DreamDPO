@@ -53,6 +53,8 @@ class MultiviewDiffusionGuidance(BaseModule):
 
         # Parallel scoring (batched q_sample, reward + AI feedback for both candidates)
         parallel_scoring: bool = True
+        # Smooth DPO
+        smooth_dpo: bool = False
 
     cfg: Config
 
@@ -358,7 +360,10 @@ class MultiviewDiffusionGuidance(BaseModule):
             score_gap[win_mask_1] = (score_1[win_mask_1] - score_2[win_mask_1])
             score_gap[win_mask_2] = (score_2[win_mask_2] - score_1[win_mask_2])
             beta_dpo = self.cfg.beta_dpo
-            grad = self.calc_grad_smooth(batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo)
+            if self.cfg.smooth_dpo:
+                grad = self.calc_grad_smooth(batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo)
+            else:
+                grad = self.calc_grad(batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo)
 
             w = (1 - self.model.alphas_cumprod[t])
             grad = w * grad
