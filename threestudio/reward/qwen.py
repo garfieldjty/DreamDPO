@@ -37,7 +37,7 @@ def process_single_image(i, img, text_input):
     img = preprocess(img)
     save_path = osp.join("outputs/qwen_temp", f"temp{i}.png")
     write_image(save_path, img)
-    tokenizer, model = init_model(qwen_model, qwen_api_key)
+    tokenizer, model = init_model('qwen-vl-plus-latest', 'sk-0e5b8e14fc9b430e8ee5fb0cdd90bb24')
     status, rsp = model.get_model_response(text_input, [save_path, ])
     return i, tokenizer.extract_score(rsp)
 
