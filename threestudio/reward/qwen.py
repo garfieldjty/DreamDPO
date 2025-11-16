@@ -14,6 +14,32 @@ from threestudio.utils.base import BaseObject
 from verifiers.Qwen.model import QwenModel
 from verifiers.Qwen.promptv1 import PromptV1
 
+import concurrent.futures
+
+def init_model(qwen_model, qwen_api_key):
+    mllm = QwenModel(api_key=qwen_api_key, model=qwen_model)
+    prompter = PromptV1()
+    return prompter, mllm
+
+def preprocess(image):
+    if isinstance(image, torch.Tensor):
+        image = image.detach().cpu().numpy()
+
+    if image.dtype == np.uint8:
+        image = image.astype(np.float32) / 255.0
+
+    # empirially to channel-last
+    if len(image.shape) == 3 and image.shape[0] < image.shape[-1]:
+        image = image.transpose(1, 2, 0)
+    return image
+
+def process_single_image(i, img, text_input):
+    img = preprocess(img)
+    save_path = osp.join("outputs/qwen_temp", f"temp{i}.png")
+    write_image(save_path, img)
+    tokenizer, model = init_model(qwen_model, qwen_api_key)
+    status, rsp = model.get_model_response(text_input, [save_path, ])
+    return i, tokenizer.extract_score(rsp)
 
 @threestudio.register("qwen-score")
 class QwenScore(BaseObject):
@@ -71,13 +97,20 @@ class QwenScore(BaseObject):
         if self.text_input is None:
             self.text_input = self.tokenizer.get_prompt(prompt)
 
-        scores = []
-        for i, img in enumerate(image):
-            img = self.preprocess(img)
-            save_path = osp.join(self.save_folder, f"temp{i}.png")
-            write_image(save_path, img)
-            status, rsp = self.model.get_model_response(self.text_input, [save_path, ])
-            scores.append(self.tokenizer.extract_score(rsp))
+        scores = [0,0,0,0]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(process_single_image, i, img, self.text_input) for i, img in enumerate(image)]
+            for future in concurrent.futures.as_completed(futures):
+                i, score = future.result()
+                scores[i] = score
+
+        # for i, img in enumerate(image):
+        #     img = self.preprocess(img)
+        #     save_path = osp.join(self.save_folder, f"temp{i}.png")
+        #     write_image(save_path, img)
+        #     status, rsp = self.model.get_model_response(self.text_input, [save_path, ])
+        #     scores.append(self.tokenizer.extract_score(rsp))
         print(scores)
         scores = torch.tensor(scores).to(self.device)
         return scores

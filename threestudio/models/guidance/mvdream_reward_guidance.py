@@ -51,6 +51,9 @@ class MultiviewDiffusionGuidance(BaseModule):
         ai_start_iter: int = 600
         ai_prob: float = 0.1
 
+        # Parallel scoring (batched q_sample, reward + AI feedback for both candidates)
+        parallel_scoring: bool = True
+
     cfg: Config
 
     def configure(self) -> None:
@@ -83,10 +86,11 @@ class MultiviewDiffusionGuidance(BaseModule):
 
         threestudio.info(f"Loaded Multiview Diffusion!")
 
-    def get_camera_cond(self,
-                        camera: Float[Tensor, "B 4 4"],
-                        fovy=None,
-                        ):
+    def get_camera_cond(
+        self,
+        camera: Float[Tensor, "B 4 4"],
+        fovy=None,
+    ):
         # Note: the input of threestudio is already blender coordinate system
         # camera = convert_opengl_to_blender(camera)
         if self.cfg.camera_condition_type == "rotation":  # normalized camera
@@ -97,7 +101,7 @@ class MultiviewDiffusionGuidance(BaseModule):
         return camera
 
     def encode_images(
-            self, imgs: Float[Tensor, "B 3 256 256"]
+        self, imgs: Float[Tensor, "B 3 256 256"]
     ) -> Float[Tensor, "B 4 32 32"]:
         input_dtype = imgs.dtype
         imgs = imgs * 2.0 - 1.0
@@ -105,8 +109,8 @@ class MultiviewDiffusionGuidance(BaseModule):
         return latents.to(input_dtype)  # [B, 4, 32, 32] Latent space image
 
     def decode_latents(
-            self,
-            latents
+        self,
+        latents
     ):
         input_dtype = latents.dtype
         x_sample = self.model.decode_first_stage(latents)
@@ -114,11 +118,15 @@ class MultiviewDiffusionGuidance(BaseModule):
         return x_sample.to(input_dtype)
 
     def process_noise_pred(
-            self, noise_pred, latents_noisy, t, prompt,
-            prompt_utils: PromptProcessorOutput,
-            elevation: Float[Tensor, "B"],
-            azimuth: Float[Tensor, "B"],
-            camera_distances: Float[Tensor, "B"],
+        self,
+        noise_pred,
+        latents_noisy,
+        t,
+        prompt,
+        prompt_utils: PromptProcessorOutput,
+        elevation: Float[Tensor, "B"],
+        azimuth: Float[Tensor, "B"],
+        camera_distances: Float[Tensor, "B"],
     ):
         noise_pred_text, noise_pred_null = noise_pred.chunk(2)
         noise_pred = noise_pred_null + self.cfg.guidance_scale * (noise_pred_text - noise_pred_null)
@@ -130,20 +138,91 @@ class MultiviewDiffusionGuidance(BaseModule):
         )
         return score, noise_pred, noise_pred_text, hat_x_t
 
+    def process_and_score(
+        self,
+        noise_pred_1: Float[Tensor, "2B ..."],
+        noise_pred_2: Float[Tensor, "2B ..."],
+        latents_noisy_1: Float[Tensor, "B ..."],
+        latents_noisy_2: Float[Tensor, "B ..."],
+        t: Float[Tensor, ""],
+        prompt: str,
+        prompt_utils: PromptProcessorOutput,
+        elevation: Float[Tensor, "B"],
+        azimuth: Float[Tensor, "B"],
+        camera_distances: Float[Tensor, "B"],
+    ):
+        """
+        Batched variant of process_noise_pred for the two candidates.
+
+        - Each noise_pred_* is [2B, ...] (text + null).
+        - Each latents_noisy_* is [B, ...].
+        - We:
+          * split (text, null) per candidate,
+          * apply CFG separately,
+          * concatenate latents and guided noises,
+          * decode and score in a single batched pass.
+        """
+
+        # Candidate 1: split text / null and apply CFG
+        noise_pred_text_1, noise_pred_null_1 = noise_pred_1.chunk(2)
+        guided_1 = noise_pred_null_1 + self.cfg.guidance_scale * (
+            noise_pred_text_1 - noise_pred_null_1
+        )
+
+        # Candidate 2: split text / null and apply CFG
+        noise_pred_text_2, noise_pred_null_2 = noise_pred_2.chunk(2)
+        guided_2 = noise_pred_null_2 + self.cfg.guidance_scale * (
+            noise_pred_text_2 - noise_pred_null_2
+        )
+
+        # Concatenate latents & guided noise for a single decode+score pass
+        latents_noisy_all = torch.cat([latents_noisy_1, latents_noisy_2], dim=0)
+        guided_all = torch.cat([guided_1, guided_2], dim=0)
+
+        pred_original_all = self.model.predict_start_from_noise(
+            latents_noisy_all, t, guided_all
+        )
+        hat_x_t_all = self.decode_latents(pred_original_all)
+
+        # Batched reward scoring
+        score_all = self.score_func(
+            hat_x_t_all,
+            prompt,
+            prompt_utils,
+            elevation,
+            azimuth,
+            camera_distances,
+        )
+
+        # Split back to per-candidate tensors
+        hat_x_t_1, hat_x_t_2 = hat_x_t_all.chunk(2, dim=0)
+        score_1, score_2 = score_all.chunk(2, dim=0)
+
+        return (
+            score_1,
+            guided_1,
+            noise_pred_text_1,
+            hat_x_t_1,
+            score_2,
+            guided_2,
+            noise_pred_text_2,
+            hat_x_t_2,
+        )
+
     def forward(
-            self,
-            rgb: Float[Tensor, "B H W C"],
-            prompt_utils: PromptProcessorOutput,
-            elevation: Float[Tensor, "B"],
-            azimuth: Float[Tensor, "B"],
-            camera_distances: Float[Tensor, "B"],
-            c2w: Float[Tensor, "B 4 4"],
-            rgb_as_latents: bool = False,
-            fovy=None,
-            timestep=None,
-            text_embeddings=None,
-            input_is_latent=False,
-            **kwargs,
+        self,
+        rgb: Float[Tensor, "B H W C"],
+        prompt_utils: PromptProcessorOutput,
+        elevation: Float[Tensor, "B"],
+        azimuth: Float[Tensor, "B"],
+        camera_distances: Float[Tensor, "B"],
+        c2w: Float[Tensor, "B 4 4"],
+        rgb_as_latents: bool = False,
+        fovy=None,
+        timestep=None,
+        text_embeddings=None,
+        input_is_latent=False,
+        **kwargs,
     ):
         batch_size = rgb.shape[0]
         camera = c2w
@@ -169,8 +248,12 @@ class MultiviewDiffusionGuidance(BaseModule):
                 latents = F.interpolate(rgb_BCHW, (64, 64), mode='bilinear', align_corners=False) * 2 - 1
             else:
                 # interp to 512x512 to be fed into vae.
-                pred_rgb = F.interpolate(rgb_BCHW, (self.cfg.image_size, self.cfg.image_size), mode='bilinear',
-                                         align_corners=False)
+                pred_rgb = F.interpolate(
+                    rgb_BCHW,
+                    (self.cfg.image_size, self.cfg.image_size),
+                    mode='bilinear',
+                    align_corners=False,
+                )
                 # encode image into latents with vae, requires grad!
                 latents = self.encode_images(pred_rgb)
 
@@ -178,17 +261,30 @@ class MultiviewDiffusionGuidance(BaseModule):
         if timestep is None:
             t = torch.randint(self.min_step, self.max_step + 1, [1], dtype=torch.long, device=latents.device)
         else:
-            assert timestep >= 0 and timestep < self.num_train_timesteps
+            assert 0 <= timestep < self.num_train_timesteps
             t = torch.full([1], timestep, dtype=torch.long, device=latents.device)
         t_expand = t.repeat(text_embeddings.shape[0])
 
         # predict the noise residual with unet, NO grad!
         with torch.no_grad():
-            # add noise
-            noise_1 = torch.randn_like(latents)
-            latents_noisy_1 = self.model.q_sample(latents, t, noise_1)
-            noise_2 = torch.randn_like(latents)
-            latents_noisy_2 = self.model.q_sample(latents, t, noise_2)
+            # --- q_sample for candidate 1 and 2 (batched or separate depending on parallel_scoring) ---
+            if self.cfg.parallel_scoring:
+                # replicate latents along batch dimension: [B, ...] -> [2B, ...]
+                latents_rep = torch.cat([latents, latents], dim=0)
+                # sample independent noises for the 2B latents
+                noise_all = torch.randn_like(latents_rep)
+                # single q_sample call for both candidates
+                latents_noisy_all = self.model.q_sample(latents_rep, t, noise_all)
+                # split back into candidate 1 / 2
+                latents_noisy_1, latents_noisy_2 = latents_noisy_all.chunk(2, dim=0)
+                noise_1, noise_2 = noise_all.chunk(2, dim=0)
+            else:
+                # original behavior: separate q_sample calls
+                noise_1 = torch.randn_like(latents)
+                latents_noisy_1 = self.model.q_sample(latents, t, noise_1)
+                noise_2 = torch.randn_like(latents)
+                latents_noisy_2 = self.model.q_sample(latents, t, noise_2)
+
             # pred noise
             latent_model_input = torch.cat([latents_noisy_1] * 2 + [latents_noisy_2] * 2)
             # save input tensors for UNet
@@ -201,26 +297,60 @@ class MultiviewDiffusionGuidance(BaseModule):
             noise_pred = self.model.apply_model(latent_model_input, t_expand, context)
 
             noise_pred_1, noise_pred_2 = noise_pred.chunk(2)
-            score_1, noise_pred_1, noise_pred_text_1, hat_x_t_1 = self.process_noise_pred(
-                noise_pred_1, latents_noisy_1, t, prompt, prompt_utils, elevation, azimuth, camera_distances
-            )
-            score_2, noise_pred_2, noise_pred_text_2, hat_x_t_2 = self.process_noise_pred(
-                noise_pred_2, latents_noisy_2, t, prompt, prompt_utils, elevation, azimuth, camera_distances
-            )
+
+            # --- Reward scoring (parallel vs sequential) ---
+            if self.cfg.parallel_scoring:
+                (
+                    score_1,
+                    noise_pred_1,
+                    noise_pred_text_1,
+                    hat_x_t_1,
+                    score_2,
+                    noise_pred_2,
+                    noise_pred_text_2,
+                    hat_x_t_2,
+                ) = self.process_and_score(
+                    noise_pred_1,
+                    noise_pred_2,
+                    latents_noisy_1,
+                    latents_noisy_2,
+                    t,
+                    prompt,
+                    prompt_utils,
+                    elevation,
+                    azimuth,
+                    camera_distances,
+                )
+            else:
+                score_1, noise_pred_1, noise_pred_text_1, hat_x_t_1 = self.process_noise_pred(
+                    noise_pred_1, latents_noisy_1, t, prompt, prompt_utils, elevation, azimuth, camera_distances
+                )
+                score_2, noise_pred_2, noise_pred_text_2, hat_x_t_2 = self.process_noise_pred(
+                    noise_pred_2, latents_noisy_2, t, prompt, prompt_utils, elevation, azimuth, camera_distances
+                )
+
             win_mask = score_1 >= score_2
 
             random_value = random.random()
-            if self.cfg.use_ai_feedback and self.global_step > self.cfg.ai_start_iter and random_value < self.cfg.ai_prob:
-                # try:
-                ai_score_1 = self.ai_score_func(hat_x_t_1, prompt)
-                ai_score_2 = self.ai_score_func(hat_x_t_2, prompt)
+            if (
+                self.cfg.use_ai_feedback
+                and self.global_step > self.cfg.ai_start_iter
+                and random_value < self.cfg.ai_prob
+            ):
+                # Batched AI feedback if requested
+                if self.cfg.parallel_scoring:
+                    hat_x_t_all = torch.cat([hat_x_t_1, hat_x_t_2], dim=0)
+                    ai_score_all = self.ai_score_func(hat_x_t_all, prompt)
+                    ai_score_1, ai_score_2 = ai_score_all.chunk(2, dim=0)
+                else:
+                    ai_score_1 = self.ai_score_func(hat_x_t_1, prompt)
+                    ai_score_2 = self.ai_score_func(hat_x_t_2, prompt)
+
                 if self.cfg.neg_prompt:
                     win_mask_ai = ai_score_1 < ai_score_2
                 else:
                     win_mask_ai = ai_score_1 > ai_score_2
                 win_mask = torch.logical_or(win_mask, win_mask_ai)
-                # except:
-                #     print("Something wrong when using AI Feedback!")
 
             win_mask_1, win_mask_2 = win_mask, torch.logical_not(win_mask)
 
@@ -233,9 +363,11 @@ class MultiviewDiffusionGuidance(BaseModule):
 
             reward = torch.zeros_like(noise_pred_1)
             reward[win_mask_1] = (noise_pred_1[win_mask_1] - noise_1[win_mask_1]) - (
-                    noise_pred_text_2[win_mask_1] - noise_2[win_mask_1])
+                noise_pred_text_2[win_mask_1] - noise_2[win_mask_1]
+            )
             reward[win_mask_2] = (noise_pred_2[win_mask_2] - noise_2[win_mask_2]) - (
-                    noise_pred_text_1[win_mask_2] - noise_1[win_mask_2])
+                noise_pred_text_1[win_mask_2] - noise_1[win_mask_2]
+            )
             # sds
             reward_sds = torch.zeros_like(noise_pred_1)
             reward_sds[win_mask_1] = noise_pred_1[win_mask_1]
