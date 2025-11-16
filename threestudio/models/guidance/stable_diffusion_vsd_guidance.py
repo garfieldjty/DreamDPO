@@ -37,7 +37,7 @@ class ToWeightsDType(nn.Module):
 class StableDiffusionVSDGuidance(BaseModule):
     @dataclass
     class Config(BaseModule.Config):
-        pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-1-base"
+        pretrained_model_name_or_path: str = "RedbeardNZ/stable-diffusion-2-1-base"
         pretrained_model_name_or_path_lora: str = "stabilityai/stable-diffusion-2-1"
         enable_memory_efficient_attention: bool = False
         enable_sequential_cpu_offload: bool = False

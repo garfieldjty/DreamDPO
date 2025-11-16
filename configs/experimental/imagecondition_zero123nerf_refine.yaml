@@ -89,12 +89,12 @@ system:
 
   prompt_processor_type: "stable-diffusion-prompt-processor"
   prompt_processor:
-    pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base"
+    pretrained_model_name_or_path: "RedbeardNZ/stable-diffusion-2-1-base"
     prompt: ???
 
   guidance_type: "stable-diffusion-guidance"
   guidance:
-    pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base"
+    pretrained_model_name_or_path: "RedbeardNZ/stable-diffusion-2-1-base"
     guidance_scale: 50
     min_step_percent: [0, 0.4, 0.1, 200]  # (start_iter, start_val, end_val, end_iter)
     max_step_percent: [0, 0.7, 0.4, 200]
