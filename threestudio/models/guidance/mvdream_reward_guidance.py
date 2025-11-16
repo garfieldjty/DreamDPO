@@ -358,21 +358,7 @@ class MultiviewDiffusionGuidance(BaseModule):
             score_gap[win_mask_1] = (score_1[win_mask_1] - score_2[win_mask_1])
             score_gap[win_mask_2] = (score_2[win_mask_2] - score_1[win_mask_2])
             beta_dpo = self.cfg.beta_dpo
-            gap_mask = (score_gap < beta_dpo).int().view(batch_size, 1, 1, 1)
-            mask = gap_mask.to(self.device)
-
-            reward = torch.zeros_like(noise_pred_1)
-            reward[win_mask_1] = (noise_pred_1[win_mask_1] - noise_1[win_mask_1]) - (
-                noise_pred_text_2[win_mask_1] - noise_2[win_mask_1]
-            )
-            reward[win_mask_2] = (noise_pred_2[win_mask_2] - noise_2[win_mask_2]) - (
-                noise_pred_text_1[win_mask_2] - noise_1[win_mask_2]
-            )
-            # sds
-            reward_sds = torch.zeros_like(noise_pred_1)
-            reward_sds[win_mask_1] = noise_pred_1[win_mask_1]
-            reward_sds[win_mask_2] = noise_pred_2[win_mask_2]
-            grad = mask * reward_sds + (1 - mask) * reward
+            grad = self.calc_grad_smooth(batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo)
 
             w = (1 - self.model.alphas_cumprod[t])
             grad = w * grad
@@ -390,6 +376,53 @@ class MultiviewDiffusionGuidance(BaseModule):
             "loss_sds": loss,
             "grad_norm": grad.norm(),
         }
+
+    def calc_grad(self, batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo):
+        gap_mask = (score_gap < beta_dpo).int().view(batch_size, 1, 1, 1)
+        mask = gap_mask.to(self.device)
+
+        reward = torch.zeros_like(noise_pred_1)
+        reward[win_mask_1] = (noise_pred_1[win_mask_1] - noise_1[win_mask_1]) - (
+                noise_pred_text_2[win_mask_1] - noise_2[win_mask_1]
+            )
+        reward[win_mask_2] = (noise_pred_2[win_mask_2] - noise_2[win_mask_2]) - (
+                noise_pred_text_1[win_mask_2] - noise_1[win_mask_2]
+            )
+            # sds
+        reward_sds = torch.zeros_like(noise_pred_1)
+        reward_sds[win_mask_1] = noise_pred_1[win_mask_1]
+        reward_sds[win_mask_2] = noise_pred_2[win_mask_2]
+        grad = mask * reward_sds + (1 - mask) * reward
+        return grad
+
+    def calc_grad_smooth(self, batch_size, noise_1, noise_2, noise_pred_1, noise_pred_2, noise_pred_text_1, noise_pred_text_2, win_mask_1, win_mask_2, score_gap, beta_dpo):
+        if beta_dpo > 0.0:
+            # Linear ramp: small gaps -> more SDS, large gaps -> more DPO
+            dpo_weight = torch.sigmoid(score_gap / beta_dpo) 
+        else:
+            # Backwards-compatible: beta_dpo <= 0 means "always use DPO-style reward"
+            dpo_weight = torch.ones_like(score_gap)
+
+        # [B] -> [B, 1, 1, 1] for broadcasting over latent shape
+        dpo_weight = dpo_weight.view(batch_size, 1, 1, 1).to(self.device)
+        sds_weight = 1.0 - dpo_weight
+
+        # reward: "DPO-ish" gradient; reward_sds: pure SDS gradient
+        reward = torch.zeros_like(noise_pred_1)
+        reward[win_mask_1] = (noise_pred_1[win_mask_1] - noise_1[win_mask_1]) - (
+            noise_pred_text_2[win_mask_1] - noise_2[win_mask_1]
+        )
+        reward[win_mask_2] = (noise_pred_2[win_mask_2] - noise_2[win_mask_2]) - (
+            noise_pred_text_1[win_mask_2] - noise_1[win_mask_2]
+        )
+
+        reward_sds = torch.zeros_like(noise_pred_1)
+        reward_sds[win_mask_1] = noise_pred_1[win_mask_1]
+        reward_sds[win_mask_2] = noise_pred_2[win_mask_2]
+
+        # Smooth mix: per-sample convex combination
+        grad = sds_weight * reward_sds + dpo_weight * reward
+        return grad
 
     @torch.cuda.amp.autocast(enabled=False)
     def set_min_max_steps(self, min_step_percent=0.02, max_step_percent=0.98):
