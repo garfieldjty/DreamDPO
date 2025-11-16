@@ -249,6 +249,120 @@ def main(args, extras) -> None:
         ckpt = torch.load(ckpt_path, map_location="cpu")
         system.set_resume_status(ckpt["epoch"], ckpt["global_step"])
 
+    def run_imagereward_eval():
+        """Render test views and evaluate them with ImageReward, then save a JSON file.
+
+        This follows the paper's protocol:
+        "For each 3D asset, we uniformly render 120 RGB images from different viewpoints
+        with the existing code base. Afterward, the ImageReward score is computed from
+        the multi-view renderings and averaged for each prompt."
+        """
+        # Only run on rank 0 to avoid duplicate work
+        if get_rank() != 0:
+            return
+
+        try:
+            from threestudio.reward.imagereward import ImageRewardScore  # type: ignore
+        except Exception as e:
+            logging.warning(f"[ImageReward] Failed to import ImageRewardScore: {e}")
+            return
+
+        # Try to obtain the text prompt from config; fall back to empty string
+        prompt = ""
+        try:
+            prompt = cfg.system.prompt_processor.prompt  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        if prompt is None:
+            prompt = ""
+
+        logging.info(f"[ImageReward] Evaluating with prompt: {prompt!r}")
+
+        try:
+            # Most DreamFusion/MVDream data modules use data.random_camera.n_test_views
+            if hasattr(cfg.data, "random_camera"):
+                cfg.data.random_camera.n_test_views = 120
+                logging.info("[ImageReward] Overriding n_test_views to 120 for evaluation.")
+            else:
+                logging.info("[ImageReward] random_camera config not found; cannot override n_test_views.")
+        except Exception:
+            logging.warning("[ImageReward] Failed to override n_test_views.")
+
+        # Prepare test dataloader (typically uses n_test_views, e.g. 120 views)
+        dm.setup("test")
+        test_loader = dm.test_dataloader()
+
+        # Initialize reward model (uses default weights path in Config)
+        reward = ImageRewardScore()
+
+        all_scores = []
+
+        system.eval()
+        import torch as _torch
+
+        with _torch.no_grad():
+            for batch in test_loader:
+                # Move tensors to the same device as the system
+                batch_on_device = {}
+                for k, v in batch.items():
+                    if isinstance(v, _torch.Tensor):
+                        batch_on_device[k] = v.to(system.device)
+                    else:
+                        batch_on_device[k] = v
+
+                # Forward pass to get rendered RGB images
+                out = system(batch_on_device)
+                if "comp_rgb" not in out:
+                    logging.warning(
+                        "[ImageReward] 'comp_rgb' not found in system output; skipping batch."
+                    )
+                    continue
+
+                images = out["comp_rgb"]  # [B, H, W, 3] or [B, 3, H, W]
+                if images.ndim != 4:
+                    logging.warning(
+                        f"[ImageReward] Expected comp_rgb to be 4D, got shape {tuple(images.shape)}; skipping batch."
+                    )
+                    continue
+
+                # Ensure [B, 3, H, W]
+                if images.shape[1] != 3 and images.shape[-1] == 3:
+                    images = images.permute(0, 3, 1, 2)
+
+                # ImageRewardScore expects images in [0, 1]
+                images = _torch.clamp(images, 0.0, 1.0)
+
+                scores = reward(images, prompt)
+                if isinstance(scores, _torch.Tensor):
+                    all_scores.append(scores.detach().cpu().view(-1))
+
+        if len(all_scores) == 0:
+            logging.warning("[ImageReward] No scores collected; nothing to save.")
+            return
+
+        all_scores_tensor = _torch.cat(all_scores, dim=0)
+        mean_score = float(all_scores_tensor.mean().item())
+
+        import json
+
+        result = {
+            "prompt": prompt,
+            "num_images": int(all_scores_tensor.shape[0]),
+            "image_reward_mean": mean_score,
+            "image_reward_all": all_scores_tensor.tolist(),
+        }
+
+        os.makedirs(cfg.trial_dir, exist_ok=True)
+        out_path = os.path.join(cfg.trial_dir, "imagereward_eval.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
+
+        logging.info(
+            f"[ImageReward] Mean ImageReward score over {int(all_scores_tensor.shape[0])} views: {mean_score:.4f}"
+        )
+        logging.info(f"[ImageReward] Saved ImageReward evaluation to {out_path}")
+
     if args.train:
         trainer.fit(system, datamodule=dm, ckpt_path=cfg.resume)
         trainer.test(system, datamodule=dm)
@@ -266,6 +380,10 @@ def main(args, extras) -> None:
     elif args.export:
         set_system_status(system, cfg.resume)
         trainer.predict(system, datamodule=dm, ckpt_path=cfg.resume)
+
+    # Optional ImageReward evaluation on the rendered test views
+    if getattr(args, "eval_imagereward", False):
+        run_imagereward_eval()
 
 
 if __name__ == "__main__":
@@ -298,6 +416,12 @@ if __name__ == "__main__":
         "--typecheck",
         action="store_true",
         help="whether to enable dynamic type checking",
+    )
+
+    parser.add_argument(
+        "--eval-imagereward",
+        action="store_true",
+        help="if true, run ImageReward evaluation on the test views after the main run",
     )
 
     args, extras = parser.parse_known_args()
