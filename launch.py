@@ -249,7 +249,7 @@ def main(args, extras) -> None:
         ckpt = torch.load(ckpt_path, map_location="cpu")
         system.set_resume_status(ckpt["epoch"], ckpt["global_step"])
 
-    def run_imagereward_eval():
+    def run_imagereward_eval(system, dm, cfg):
         """Render test views and evaluate them with ImageReward, then save a JSON file.
 
         This follows the paper's protocol:
@@ -279,37 +279,26 @@ def main(args, extras) -> None:
 
         logging.info(f"[ImageReward] Evaluating with prompt: {prompt!r}")
 
-        try:
-            # Most DreamFusion/MVDream data modules use data.random_camera.n_test_views
-            if hasattr(cfg.data, "random_camera"):
-                cfg.data.random_camera.n_test_views = 120
-                logging.info("[ImageReward] Overriding n_test_views to 120 for evaluation.")
-            else:
-                logging.info("[ImageReward] random_camera config not found; cannot override n_test_views.")
-        except Exception:
-            logging.warning("[ImageReward] Failed to override n_test_views.")
-
         # Prepare test dataloader (typically uses n_test_views, e.g. 120 views)
         dm.setup("test")
         test_loader = dm.test_dataloader()
 
         # Initialize reward model (uses default weights path in Config)
-        reward = ImageRewardScore()
+        reward = ImageRewardScore({})
 
         all_scores = []
 
         system.eval()
         import torch as _torch
+        device = _torch.device("cuda" if _torch.cuda.is_available() else "cpu")
+        system = system.to(device)
 
         with _torch.no_grad():
             for batch in test_loader:
-                # Move tensors to the same device as the system
-                batch_on_device = {}
-                for k, v in batch.items():
-                    if isinstance(v, _torch.Tensor):
-                        batch_on_device[k] = v.to(system.device)
-                    else:
-                        batch_on_device[k] = v
+                batch_on_device = {
+                    k: (v.to(system.device) if isinstance(v, _torch.Tensor) else v)
+                    for k, v in batch.items()
+                }
 
                 # Forward pass to get rendered RGB images
                 out = system(batch_on_device)
@@ -383,7 +372,7 @@ def main(args, extras) -> None:
 
     # Optional ImageReward evaluation on the rendered test views
     if getattr(args, "eval_imagereward", False):
-        run_imagereward_eval()
+        run_imagereward_eval(system, dm, cfg)
 
 
 if __name__ == "__main__":
