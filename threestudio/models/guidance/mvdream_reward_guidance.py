@@ -47,6 +47,7 @@ class MultiviewDiffusionGuidance(BaseModule):
 
         # AI Feedback
         use_ai_feedback: bool = False
+        ai_feedback_class: str = "qwen-score"
         neg_prompt: bool = False
         ai_start_iter: int = 600
         ai_prob: float = 0.1
@@ -80,8 +81,8 @@ class MultiviewDiffusionGuidance(BaseModule):
         print(f"Initialize Reward Model from {self.cfg.reward_model}")
 
         # AI feedback model
-        if self.cfg.use_ai_feedback:
-            self.ai_score_func = threestudio.find("qwen-score")({})
+        if self.cfg.use_ai_feedback and self.cfg.ai_feedback_class:
+            self.ai_score_func = threestudio.find(self.cfg.ai_feedback_class)({})
 
         self.to(self.device)
         # self.model = self.model.to(self.weights_dtype)
