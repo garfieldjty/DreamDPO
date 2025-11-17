@@ -39,7 +39,7 @@ class LMMVisionScore(BaseObject):
         #   - "openai/gpt-4.1-mini"
         #   - "openai/gpt-4.1"
         #   - future: "openai/gpt-5-vision" (hypothetical)
-        model: str = "google/gemini-2.5-flash"
+        model: str = "google/gemini-2.5-pro"
 
         # Prefer to set via env: OPENROUTER_API_KEY
         api_key: str = os.environ.get("OPENROUTER_API_KEY", "")
@@ -52,11 +52,26 @@ class LMMVisionScore(BaseObject):
 
         # System prompt: ask the model to return ONLY a numeric score [0,1].
         system_prompt: str = (
-            "You are an expert image judge. "
-            "Given a TEXT PROMPT and an IMAGE, rate how well the image matches the prompt. "
-            "Respond with a SINGLE floating point number between 0 and 1, "
-            "where 1 means a perfect match and 0 means completely unrelated. "
-            "Do not output anything except the number."
+            "You are an expert 3D-aware image evaluator. "
+            "Your task is to judge how well a rendered IMAGE matches the intended TEXT PROMPT "
+            "for the purpose of generating consistent multi-view 3D assets.\n\n"
+
+            "Focus FIRST on the overall high-level semantics and global appearance: "
+            "identity, category, shape, proportions, pose, composition, and major colors.\n"
+            "Focus SECOND on fine-grained details: textures, materials, surface patterns, "
+            "lighting consistency, and small object attributes.\n\n"
+
+            "Your score must reflect how well the image would serve as one correct view "
+            "of a coherent and stable 3D object or scene described by the text.\n"
+            "Penalize deviations in structure, shape, or essential features more heavily "
+            "than minor texture inaccuracies.\n\n"
+
+            "Output ONLY a SINGLE floating-point number between 0 and 1, where:\n"
+            "  • 1 = perfect semantic match and stable 3D-consistent appearance\n"
+            "  • 0 = unrelated or useless for 3D generation\n\n"
+
+            "Do NOT provide explanations, words, percentages, or extra formatting. "
+            "Return ONLY the numeric score."
         )
 
     cfg: Config
